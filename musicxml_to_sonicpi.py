@@ -19,40 +19,54 @@ class Note:
                 'step')[0].firstChild.nodeValue
             self.octave = pitch_tag.getElementsByTagName(
                 'octave')[0].firstChild.nodeValue
+            self.alter=''
             alter_tag = pitch_tag.getElementsByTagName('alter')
-            self.alter = alter_tag[0].firstChild.nodeValue if alter_tag else 0
+            if alter_tag:
+                alter_value = int(alter_tag[0].firstChild.nodeValue)
+                self.alter = f'+{alter_value}' if alter_value > 0 else alter_value
             articulation_tag = note_tag.getElementsByTagName('articulations')
             if articulation_tag:
                 if articulation_tag[0].getElementsByTagName('staccato'):
                     self.staccato = True
                 else:
-                    print('# Unsupported articulation found')
+                    print('# Note Unsupported articulation found')
         else:
-            self.step = None  # It is a rest
+            self.step = None  # It is a rest as it has no pitch
         if not note_tag.getElementsByTagName('chord'):
-            # print(f'NOT A CHORD {previous_duration} {self.duration}')
             self.offset = previous_duration + previous_offset
         else:
             self.offset = previous_offset
 
-    def print(self):
-        if self.step:  # don't do anything if a rest
-            print('play ', end='')
-            print(f':{self.step}{self.octave} ', end='')
-            if (self.alter):
-                print(f'+ {self.alter}', end='')
-            attack = 0
-            sustain = 0
+    def get_play_params_name(self):
+        play_params_name_staccato='_s' if self.staccato else ''
+        play_params_name=f'd{self.duration}{play_params_name_staccato}'.replace('.', '_')
+        return play_params_name
+
+    def get_play_params_var(self):
+        attack = 0
+        sustain = 0
+        release = 0
+        staccato_message=''
+        if self.staccato:
+            attack = self.duration*0.75
+            sustain = self.duration*0.25
             release = 0
-            if self.staccato:
-                attack = self.duration*0.75
-                sustain = self.duration*0.25
-                release = 0
-            else:
-                attack = self.duration/2
-                sustain = 0
-                release = self.duration/2
-            print(f', attack:{attack}, sustain:{sustain}, release:{release}')
+            staccato_message=' with staccato'
+        else:
+            attack = self.duration/2
+            sustain = 0
+            release = self.duration/2
+        return f'{self.get_play_params_name()}={{attack:{attack}, sustain:{sustain}, release:{release}}} # duration {self.duration} note {staccato_message}'
+        
+    def get_play_string(self):
+        play_string=[]
+        if self.step:  # don't do anything if a rest
+            play_string.append('play ')
+            play_string.append(f':{self.step}{self.octave}')
+            if (self.alter):
+                play_string.append(f'{self.alter}')
+            play_string.append(f', {self.get_play_params_name()}')
+        return ''.join(play_string)
 
 
 class Music:
@@ -86,12 +100,14 @@ class Music:
         self.process_parts()
 
     def process_parts(self):
+        song_code={}
+        song_play_params=set()
         for part in self.doc.getElementsByTagName('part'):
             part_id = part.getAttribute('id')
-            print(f'define :play_{part_id} do')
+            song_code[part_id]={} # dict of measures
             for measure in part.getElementsByTagName('measure'):
                 measure_number = measure.getAttribute('number')
-                print(f'# measure {measure_number}')
+                song_code[part_id][measure_number] = []
                 previous_offset = 0
                 previous_duration = 0
                 notes = []
@@ -108,24 +124,42 @@ class Music:
                         notes.append(note)
                         previous_offset = note.offset
                         previous_duration = note.duration
+                # First, sort in the reverse duration so that the notes with the shortest 
+                # duration sleep before the notes with the longer durations but same offset
                 notes.sort(key=lambda x: x.duration, reverse=True)
                 notes.sort(key=lambda x: x.offset)
                 previous_offset = 0
                 previous_duration = 0
                 measure_total= 0
                 for note in notes:
-                    print(f'# offset: {note.offset}')
+                    song_play_params.add(note.get_play_params_var()) 
                     if note.offset > previous_offset:
                         measure_total=measure_total+previous_duration
-                        print(f'sleep {previous_duration}')
+                        if song_code[part_id][measure_number][-1].startswith('sleep'):
+                            neighbour_sleep_duration=float(song_code[part_id][measure_number][-1].split()[-1])
+                            song_code[part_id][measure_number][-1] = f'sleep {previous_duration + neighbour_sleep_duration}'
+                        else:
+                            song_code[part_id][measure_number].append(f'sleep {previous_duration}')
                     previous_offset = note.offset
                     previous_duration = note.duration
-                    note.print()
+                    if (note.step): song_code[part_id][measure_number].append(note.get_play_string()) 
                 measure_total=measure_total+note.duration
-                print(f'sleep {note.duration}')
+                song_code[part_id][measure_number].append(f'sleep {note.duration}')
+        # Now print the code, starting with the play param definitions
+        for play_param in song_play_params:
+            print(play_param)
+
+        for part in song_code:
+            print(f'define :play_{part} do')
+            for measure in song_code[part]:
+                print(f'   # bar {measure}')
+                for line in song_code[part][measure]:
+                    print(f'   {line}')
             print('end')
 
 
 if __name__ == "__main__":
+    if sys.version_info < (3,7):
+        raise RuntimeError("This package requres Python 3.7+") # Dict keeps insertion order
     music = Music(sys.argv[1])
     music.print_sonicpi()
